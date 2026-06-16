@@ -114,17 +114,17 @@ func TestParseServeOptions(t *testing.T) {
 		if opts.demo {
 			t.Fatal("expected demo=false by default")
 		}
-		if !opts.web || !opts.mcpSSE || opts.mcpStdio {
+		if !opts.web || !opts.mcpHTTP || !opts.mcpSSE || opts.mcpStdio {
 			t.Fatalf("unexpected default serve options: %+v", opts)
 		}
 	})
 
 	t.Run("accepts explicit transport flags", func(t *testing.T) {
-		opts, err := parseServeOptions([]string{"--demo", "--no-web", "--no-mcp-sse", "--mcp-stdio"})
+		opts, err := parseServeOptions([]string{"--demo", "--no-web", "--no-mcp-http", "--no-mcp-sse", "--mcp-stdio"})
 		if err != nil {
 			t.Fatalf("parseServeOptions(): %v", err)
 		}
-		if !opts.demo || opts.web || opts.mcpSSE || !opts.mcpStdio {
+		if !opts.demo || opts.web || opts.mcpHTTP || opts.mcpSSE || !opts.mcpStdio {
 			t.Fatalf("unexpected serve options: %+v", opts)
 		}
 	})
@@ -134,13 +134,13 @@ func TestParseServeOptions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parseServeOptions(): %v", err)
 		}
-		if opts.web || opts.mcpSSE || !opts.mcpStdio {
+		if opts.web || opts.mcpHTTP || opts.mcpSSE || !opts.mcpStdio {
 			t.Fatalf("unexpected serve options: %+v", opts)
 		}
 	})
 
 	t.Run("rejects empty transport set", func(t *testing.T) {
-		if _, err := parseServeOptions([]string{"--no-web", "--no-mcp-sse"}); err == nil {
+		if _, err := parseServeOptions([]string{"--no-web", "--no-mcp-http", "--no-mcp-sse"}); err == nil {
 			t.Fatal("expected error when every transport is disabled")
 		}
 	})

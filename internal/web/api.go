@@ -39,7 +39,7 @@ const maxUploadBytes = 128 << 20
 
 // APIHandler creates the HTTP handler with JSON API routes and static file serving.
 // The client may be nil (disconnected state).
-// mcpHandler is an optional http.Handler for the MCP SSE endpoint (mounted at /mcp/).
+// mcpHandler is an optional http.Handler for MCP endpoints mounted under /mcp.
 // StartDeepBackfill can optionally launch a guarded background backfill triggered by POST /api/backfill.
 // StatusChecker returns whether the backend is connected.
 type StatusChecker func() bool
@@ -1911,11 +1911,11 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 	staticHandler := http.FileServer(http.FS(staticContent))
 	mux.Handle("/", staticHandler)
 
-	// Wrap the mux to intercept /mcp/ requests before the mux's catch-all
+	// Wrap the mux to intercept /mcp requests before the mux's catch-all.
 	var handler http.Handler = mux
 	if mcpHandler != nil {
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.URL.Path, "/mcp/") {
+			if r.URL.Path == "/mcp" || strings.HasPrefix(r.URL.Path, "/mcp/") {
 				mcpHandler.ServeHTTP(w, r)
 				return
 			}

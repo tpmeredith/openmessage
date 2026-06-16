@@ -29,6 +29,7 @@ import (
 type serveOptions struct {
 	demo     bool
 	web      bool
+	mcpHTTP  bool
 	mcpSSE   bool
 	mcpStdio bool
 }
@@ -356,12 +357,27 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 	)
 	tools.Register(mcpSrv, a)
 
+	var mcpHandler http.Handler
+	var httpSrv http.Handler
+	if opts.mcpHTTP {
+		httpSrv = mcpserver.NewStreamableHTTPServer(mcpSrv)
+	}
 	var sseSrv http.Handler
 	if opts.mcpSSE {
 		sseSrv = mcpserver.NewSSEServer(mcpSrv,
 			mcpserver.WithBaseURL(baseURL),
 			mcpserver.WithStaticBasePath("/mcp"),
 		)
+	}
+	if httpSrv != nil || sseSrv != nil {
+		mux := http.NewServeMux()
+		if httpSrv != nil {
+			mux.Handle("/mcp", httpSrv)
+		}
+		if sseSrv != nil {
+			mux.Handle("/mcp/", sseSrv)
+		}
+		mcpHandler = mux
 	}
 
 	googleStatus := func() any {
@@ -371,11 +387,11 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		return a.GoogleStatus()
 	}
 
-	httpEnabled := opts.web || opts.mcpSSE
+	httpEnabled := opts.web || opts.mcpHTTP || opts.mcpSSE
 	if httpEnabled {
 		httpHandler := http.Handler(nil)
 		if opts.web {
-			httpHandler = web.APIHandlerWithOptions(a.Store, nil, logger, sseSrv, web.APIOptions{
+			httpHandler = web.APIHandlerWithOptions(a.Store, nil, logger, mcpHandler, web.APIOptions{
 				Client:               a.GetClient,
 				Events:               events,
 				IdentityName:         identityName,
@@ -413,6 +429,9 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 			})
 		} else {
 			mux := http.NewServeMux()
+			if httpSrv != nil {
+				mux.Handle("/mcp", httpSrv)
+			}
 			if sseSrv != nil {
 				mux.Handle("/mcp/", sseSrv)
 			}
@@ -426,6 +445,9 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		go func() {
 			if opts.web {
 				logger.Info().Str("addr", listenAddr).Msg("Web UI available at " + baseURL)
+			}
+			if opts.mcpHTTP {
+				logger.Info().Str("addr", listenAddr).Msg("MCP streamable HTTP available at " + baseURL + "/mcp")
 			}
 			if opts.mcpSSE {
 				logger.Info().Str("addr", listenAddr).Msg("MCP SSE available at " + baseURL + "/mcp/sse")
@@ -490,8 +512,9 @@ func RunDemo(logger zerolog.Logger) error {
 
 func parseServeOptions(args []string) (serveOptions, error) {
 	opts := serveOptions{
-		web:    true,
-		mcpSSE: true,
+		web:     true,
+		mcpHTTP: true,
+		mcpSSE:  true,
 	}
 	transportFlagsSeen := false
 	enableExplicitTransportMode := func() {
@@ -500,6 +523,7 @@ func parseServeOptions(args []string) (serveOptions, error) {
 		}
 		transportFlagsSeen = true
 		opts.web = false
+		opts.mcpHTTP = false
 		opts.mcpSSE = false
 		opts.mcpStdio = false
 	}
@@ -513,6 +537,12 @@ func parseServeOptions(args []string) (serveOptions, error) {
 		case "--no-web":
 			enableExplicitTransportMode()
 			opts.web = false
+		case "--mcp-http":
+			enableExplicitTransportMode()
+			opts.mcpHTTP = true
+		case "--no-mcp-http":
+			enableExplicitTransportMode()
+			opts.mcpHTTP = false
 		case "--mcp-sse":
 			enableExplicitTransportMode()
 			opts.mcpSSE = true
@@ -530,8 +560,8 @@ func parseServeOptions(args []string) (serveOptions, error) {
 			return serveOptions{}, fmt.Errorf("unknown serve option: %s", arg)
 		}
 	}
-	if !opts.web && !opts.mcpSSE && !opts.mcpStdio {
-		return serveOptions{}, fmt.Errorf("serve requires at least one enabled transport: web, mcp-sse, or mcp-stdio")
+	if !opts.web && !opts.mcpHTTP && !opts.mcpSSE && !opts.mcpStdio {
+		return serveOptions{}, fmt.Errorf("serve requires at least one enabled transport: web, mcp-http, mcp-sse, or mcp-stdio")
 	}
 	return opts, nil
 }
