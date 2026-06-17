@@ -58,6 +58,7 @@ type APIOptions struct {
 	IsConnected           StatusChecker
 	GoogleStatus          func() any
 	RecordGoogleSend      func(success bool) // tracks Google send outcomes for stuck-session detection
+	MarkGoogleAuthExpired func(error) bool
 	ReconnectGoogle       func() error
 	Unpair                UnpairFunc
 	WhatsAppStatus        func() any
@@ -155,6 +156,16 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 		if opts.RecordGoogleSend != nil {
 			opts.RecordGoogleSend(success)
 		}
+	}
+	markGoogleAuthExpired := func(err error) bool {
+		if opts.MarkGoogleAuthExpired == nil {
+			return false
+		}
+		marked := opts.MarkGoogleAuthExpired(err)
+		if marked {
+			publishStatus(currentConnected())
+		}
+		return marked
 	}
 	// Per-platform data-freshness, used to catch "zombie" bridges that report
 	// connected=true while no longer actually syncing (the connection flag
@@ -987,6 +998,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 		// Fetch conversation to get SIM and participant info
 		conv, err := cli.GM.GetConversation(req.ConversationID)
 		if err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("get conversation", err), 502)
 			return
 		}
@@ -1003,6 +1015,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 
 		resp, err := cli.GM.SendMessage(payload)
 		if err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("send message", err), 502)
 			return
 		}
@@ -1156,6 +1169,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 		// Upload media via libgm
 		media, err := cli.GM.UploadMedia(data, header.Filename, mime)
 		if err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("upload media", err), 502)
 			return
 		}
@@ -1163,6 +1177,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 		// Get SIM and participant info
 		conv, err := cli.GM.GetConversation(convID)
 		if err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("get conversation", err), 502)
 			return
 		}
@@ -1180,6 +1195,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 
 		resp, err := cli.GM.SendMessage(payload)
 		if err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("send message", err), 502)
 			return
 		}
@@ -1291,6 +1307,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 		}
 		data, err := cli.GM.DownloadMedia(msg.MediaID, key)
 		if err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("download media", err), 502)
 			return
 		}
@@ -1356,12 +1373,16 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 		if req.ConversationID != "" {
 			if conv, err := cli.GM.GetConversation(req.ConversationID); err == nil {
 				_, sim = app.ExtractSIMAndParticipant(conv)
+			} else if markGoogleAuthExpired(err) {
+				httpError(w, googleAPIErrorMessage("get conversation", err), 502)
+				return
 			}
 		}
 
 		payload := app.BuildReactionPayload(req.MessageID, req.Emoji, req.Action, sim)
 		resp, err := cli.GM.SendReaction(payload)
 		if err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("send reaction", err), 502)
 			return
 		}
@@ -1441,6 +1462,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 			Numbers: app.NewContactNumbers([]string{req.PhoneNumber}),
 		})
 		if err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("failed to get/create conversation", err), 502)
 			return
 		}
@@ -1602,6 +1624,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 		// Use the same send logic as /api/send
 		conv, err := cli.GM.GetConversation(draft.ConversationID)
 		if err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("get conversation", err), 502)
 			return
 		}
@@ -1617,6 +1640,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 
 		resp, err := cli.GM.SendMessage(payload)
 		if err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("send message", err), 502)
 			return
 		}
@@ -1791,6 +1815,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 			return
 		}
 		if err := opts.BackfillPhone(req.PhoneNumber); err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("backfill phone", err), 502)
 			return
 		}
@@ -1817,6 +1842,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 			return
 		}
 		if err := opts.ReconnectGoogle(); err != nil {
+			markGoogleAuthExpired(err)
 			httpError(w, googleAPIErrorMessage("reconnect google messages", err), 502)
 			return
 		}

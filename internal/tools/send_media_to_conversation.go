@@ -118,16 +118,19 @@ func sendMediaToConversationHandler(a *app.App) server.ToolHandlerFunc {
 		case "", "sms":
 			media, err := uploadGoogleMedia(a, data, filename, mimeType)
 			if err != nil {
+				a.HandleGoogleAuthExpiredError(err)
 				return errorResult(fmt.Sprintf("upload media: %v", err)), nil
 			}
 			gmConv, err := getGoogleConversation(a, conversationID)
 			if err != nil {
+				a.HandleGoogleAuthExpiredError(err)
 				return errorResult(fmt.Sprintf("get conversation: %v", err)), nil
 			}
 			myParticipantID, simPayload := app.ExtractSIMAndParticipant(gmConv)
 			payload := app.BuildSendMediaPayload(conversationID, media, myParticipantID, simPayload)
 			resp, err := sendGoogleMediaMessage(a, payload)
 			if err != nil {
+				a.HandleGoogleAuthExpiredError(err)
 				return errorResult(fmt.Sprintf("failed to send media: %v", err)), nil
 			}
 			if resp.GetStatus() != gmproto.SendMessageResponse_SUCCESS {

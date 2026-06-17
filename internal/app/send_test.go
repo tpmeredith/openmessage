@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -92,5 +93,37 @@ func TestSendTextToConversationUnsupportedPlatform(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not supported") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSendTextToConversationGoogleAuthErrorMarksDisconnected(t *testing.T) {
+	a := testSendApp(t)
+	a.Connected.Store(true)
+	if err := a.Store.UpsertConversation(&db.Conversation{
+		ConversationID: "sms-conv-1",
+		Name:           "Taylor",
+		LastMessageTS:  time.Now().UnixMilli(),
+		SourcePlatform: "sms",
+	}); err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+
+	originalGetGoogleConversation := getGoogleConversationForSend
+	getGoogleConversationForSend = func(_ *App, _ string) (*gmproto.Conversation, error) {
+		return nil, errors.New("get conversation: HTTP 401: 16: Request had invalid authentication credentials")
+	}
+	t.Cleanup(func() {
+		getGoogleConversationForSend = originalGetGoogleConversation
+	})
+
+	_, _, err := a.SendTextToConversation("sms-conv-1", "hello sms")
+	if err == nil {
+		t.Fatal("expected send error")
+	}
+	if a.Connected.Load() {
+		t.Fatal("expected auth error to mark Google disconnected")
+	}
+	if got := a.GoogleStatus().LastError; got != googleAuthExpiredStatusMessage {
+		t.Fatalf("last error = %q, want %q", got, googleAuthExpiredStatusMessage)
 	}
 }

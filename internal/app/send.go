@@ -50,6 +50,7 @@ func (a *App) SendTextToConversation(conversationID, body string) (*db.Conversat
 	case "sms":
 		gmConv, err := getGoogleConversationForSend(a, conversationID)
 		if err != nil {
+			a.HandleGoogleAuthExpiredError(err)
 			return conv, nil, fmt.Errorf("get Google conversation: %w", err)
 		}
 		payload, err := buildGoogleTextPayload(gmConv, conversationID, body)
@@ -58,6 +59,7 @@ func (a *App) SendTextToConversation(conversationID, body string) (*db.Conversat
 		}
 		resp, err := sendGoogleTextPayload(a, payload)
 		if err != nil {
+			a.HandleGoogleAuthExpiredError(err)
 			return conv, nil, fmt.Errorf("send Google message: %w", err)
 		}
 		if resp.GetStatus() != gmproto.SendMessageResponse_SUCCESS {
