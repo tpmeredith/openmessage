@@ -720,6 +720,7 @@ func (a *App) storeMessage(msg *gmproto.Message) {
 		TimestampMS:    msg.GetTimestamp() / 1000,
 		Status:         status,
 		IsFromMe:       client.MessageIsFromMe(msg),
+		SourcePlatform: "sms",
 	}
 
 	if media := client.ExtractMediaInfo(msg); media != nil {
