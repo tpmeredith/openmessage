@@ -3168,6 +3168,26 @@ func TestAPIGuardRejectsEmptyHost(t *testing.T) {
 	}
 }
 
+func TestAPIGuardAllowsConfiguredLANHost(t *testing.T) {
+	t.Setenv("OPENMESSAGES_HOST", "192.168.10.39")
+
+	r := httptest.NewRequest(http.MethodGet, "/api/conversations", nil)
+	r.Host = "192.168.10.39:7007"
+	if !isLocalAPIRequest(r) {
+		t.Fatal("configured LAN Host must pass the guard")
+	}
+
+	r.Header.Set("Origin", "http://192.168.10.39:7007")
+	if !isLocalAPIRequest(r) {
+		t.Fatal("configured LAN Origin must pass the guard")
+	}
+
+	r.Header.Set("Origin", "http://192.168.10.40:7007")
+	if isLocalAPIRequest(r) {
+		t.Fatal("unconfigured LAN Origin must not pass the guard")
+	}
+}
+
 func TestSecurityHeadersPresent(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.server.Close()

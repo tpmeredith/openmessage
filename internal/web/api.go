@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"runtime"
 	"sort"
 	"strconv"
@@ -2085,18 +2086,59 @@ func setSecurityHeaders(w http.ResponseWriter) {
 // isLoopbackHost reports whether a bare hostname refers to this machine's
 // loopback interface.
 func isLoopbackHost(hostname string) bool {
-	switch strings.ToLower(strings.Trim(hostname, "[]")) {
+	switch normalizeAPIHostname(hostname) {
 	case "127.0.0.1", "localhost", "::1":
 		return true
 	}
 	return false
 }
 
+func normalizeAPIHostname(hostname string) string {
+	host := strings.TrimSpace(hostname)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.ToLower(strings.Trim(host, "[]"))
+}
+
+func configuredAPIHosts() []string {
+	values := []string{os.Getenv("OPENMESSAGES_HOST")}
+	values = append(values, strings.Split(os.Getenv("OPENMESSAGES_TRUSTED_HOSTS"), ",")...)
+	hosts := make([]string, 0, len(values))
+	for _, value := range values {
+		host := normalizeAPIHostname(value)
+		switch host {
+		case "", "0.0.0.0", "::":
+			continue
+		default:
+			hosts = append(hosts, host)
+		}
+	}
+	return hosts
+}
+
+func isTrustedAPIHost(hostname string) bool {
+	host := normalizeAPIHostname(hostname)
+	if host == "" {
+		return false
+	}
+	if isLoopbackHost(host) {
+		return true
+	}
+	for _, configuredHost := range configuredAPIHosts() {
+		if host == configuredHost {
+			return true
+		}
+	}
+	return false
+}
+
 // isLocalAPIRequest validates that an /api/ request originates from the local
-// app rather than a cross-origin web page: the Host must be loopback (defends
-// DNS rebinding), and any Origin/Referer the browser attached must be loopback
-// too (defends drive-by cross-origin POSTs). Same-origin GETs carry no Origin
-// and pass; the native WKWebView is same-origin on 127.0.0.1 and passes.
+// app rather than a cross-origin web page: the Host must be loopback or the
+// explicitly configured OpenMessage host (defends DNS rebinding), and any
+// Origin/Referer the browser attached must be trusted too (defends drive-by
+// cross-origin POSTs). Same-origin GETs carry no Origin and pass; the native
+// WKWebView is same-origin on 127.0.0.1 and passes.
 func isLocalAPIRequest(r *http.Request) bool {
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
@@ -2105,7 +2147,7 @@ func isLocalAPIRequest(r *http.Request) bool {
 	// An absent Host header is treated as non-local: browsers always send
 	// one, so an empty value only ever comes from a hand-rolled client —
 	// which must not slip past the loopback check by omission.
-	if host == "" || !isLoopbackHost(host) {
+	if host == "" || !isTrustedAPIHost(host) {
 		return false
 	}
 	origin := r.Header.Get("Origin")
@@ -2114,7 +2156,7 @@ func isLocalAPIRequest(r *http.Request) bool {
 	}
 	if origin != "" {
 		u, err := url.Parse(origin)
-		if err != nil || !isLoopbackHost(u.Hostname()) {
+		if err != nil || !isTrustedAPIHost(u.Hostname()) {
 			return false
 		}
 	}
