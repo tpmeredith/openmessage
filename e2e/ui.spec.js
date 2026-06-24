@@ -652,6 +652,26 @@ test('centers the compose card in the bottom input layer', async ({ page }) => {
   expect(Math.abs(gaps.top - gaps.bottom)).toBeLessThanOrEqual(2);
 });
 
+test('keeps compose tool buttons tightly grouped', async ({ page }) => {
+  await openConversation(page, 'Sarah Chen');
+
+  const gaps = await page.evaluate(() => {
+    const rectFor = (selector) => document.querySelector(selector).getBoundingClientRect();
+    const attach = rectFor('#attach-btn');
+    const gif = rectFor('#compose-gif-btn');
+    const emoji = rectFor('#compose-emoji-btn');
+    const input = rectFor('#compose-input');
+    return {
+      attachToGif: gif.left - attach.right,
+      gifToEmoji: emoji.left - gif.right,
+      emojiToInput: input.left - emoji.right,
+    };
+  });
+  expect(gaps.attachToGif).toBeLessThanOrEqual(5);
+  expect(gaps.gifToEmoji).toBeLessThanOrEqual(5);
+  expect(gaps.emojiToInput).toBeGreaterThanOrEqual(8);
+});
+
 test('hydrates cached Google contact photos into avatars', async ({ page, request }) => {
   await request.post('/_e2e/avatar', {
     data: {
@@ -781,6 +801,96 @@ test('sends a captioned Signal image as one message, not two', async ({ page }) 
   if (body) {
     expect(body).toContain(caption);
   }
+});
+
+test('sends a GIF through the compose picker', async ({ page }) => {
+  const caption = `GIF caption ${Date.now()}`;
+  let sendGIFPayload = null;
+  await page.route(/\/api\/gifs(?:\/trending)?\?/, async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        results: [{
+          title: 'Wave',
+          preview_url: 'data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=',
+          url: 'https://media.klipy.com/fake/wave.gif',
+          mime_type: 'image/gif',
+          width: 1,
+          height: 1,
+        }],
+      }),
+    });
+  });
+  await page.route('**/api/send-gif', async route => {
+    sendGIFPayload = JSON.parse(route.request().postData() || '{}');
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ status: 'SUCCESS', success: true }),
+    });
+  });
+
+  await openConversation(page, 'Taylor Price');
+  await expect(page.locator('#chat-header-source')).toContainText('Signal');
+  await page.locator('#compose-input').fill(caption);
+  await page.locator('#compose-gif-btn').click();
+  await expect(page.locator('#compose-gif-panel.show')).toBeVisible();
+  await page.locator('#compose-gif-panel .gif-tile').first().click();
+
+  await expect.poll(() => sendGIFPayload).not.toBeNull();
+  expect(sendGIFPayload.conversation_id).toContain('signal:');
+  expect(sendGIFPayload.url).toBe('https://media.klipy.com/fake/wave.gif');
+  expect(sendGIFPayload.caption).toBe(caption);
+});
+
+test('debounces GIF search while typing', async ({ page }) => {
+  const gifRequests = [];
+  await page.route(/\/api\/gifs(?:\/trending)?\?/, async route => {
+    gifRequests.push(new URL(route.request().url()));
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        results: [{
+          title: 'Wave',
+          preview_url: 'data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=',
+          url: 'https://media.klipy.com/fake/wave.gif',
+          mime_type: 'image/gif',
+          width: 1,
+          height: 1,
+        }],
+      }),
+    });
+  });
+
+  await openConversation(page, 'Taylor Price');
+  await page.locator('#compose-gif-btn').click();
+  await expect(page.locator('#compose-gif-panel .gif-tile')).toHaveCount(1);
+
+  gifRequests.length = 0;
+  await page.locator('#compose-gif-search').pressSequentially('cats', { delay: 60 });
+  await page.waitForTimeout(300);
+  expect(gifRequests).toHaveLength(0);
+
+  await page.waitForTimeout(350);
+  expect(gifRequests).toHaveLength(1);
+  expect(gifRequests[0].pathname).toBe('/api/gifs');
+  expect(gifRequests[0].searchParams.get('q')).toBe('cats');
+});
+
+test('accepts dropped files in the compose box', async ({ page }) => {
+  await openConversation(page, 'Taylor Price');
+  await page.locator('#compose-bar').evaluate((composeBar) => {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(new File(['hello from drop'], 'dropped-note.txt', { type: 'text/plain' }));
+    const event = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+    composeBar.dispatchEvent(event);
+  });
+
+  await expect(page.locator('#attach-preview')).toHaveClass(/active/);
+  await expect(page.locator('#attach-name')).toHaveText('dropped-note.txt');
 });
 
 test('keeps the active thread pinned to the bottom after sending', async ({ page }) => {
