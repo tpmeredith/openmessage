@@ -101,6 +101,107 @@ func TestHandleMessage_RemovesOnlyMatchingTmpPlaceholder(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_ReconcilesUniqueTmpPlaceholderWhenEchoOmitsTmpID(t *testing.T) {
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	const tmpID = "tmp_missing_from_echo"
+	if err := store.UpsertMessage(&db.Message{
+		MessageID:      tmpID,
+		ConversationID: "c1",
+		Body:           "same outgoing body",
+		ReplyToID:      "reply-1",
+		IsFromMe:       true,
+		TimestampMS:    1000,
+		Status:         "OUTGOING_SENDING",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, _, err := store.ClaimOutgoingSendKey(tmpID, "c1"); err != nil || !claimed {
+		t.Fatalf("claim outgoing send key: claimed=%v err=%v", claimed, err)
+	}
+	if err := store.CompleteOutgoingSendKey(tmpID, tmpID, db.OutgoingSendStatusSent); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := &EventHandler{Store: store, Logger: zerolog.Nop()}
+	handler.handleMessage(&libgm.WrappedMessage{Message: &gmproto.Message{
+		MessageID:      "real_msg_without_tmp_id",
+		ConversationID: "c1",
+		Timestamp:      2300 * 1000,
+		SenderParticipant: &gmproto.Participant{
+			IsMe: true,
+		},
+		MessageInfo: []*gmproto.MessageInfo{{
+			Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: "same outgoing body"}},
+		}},
+		ReplyMessage: &gmproto.ReplyMessage{MessageID: "reply-1"},
+	}})
+
+	if got, err := store.GetMessageByID(tmpID); err != nil {
+		t.Fatal(err)
+	} else if got != nil {
+		t.Fatalf("inferred tmp placeholder should be removed, got %+v", got)
+	}
+	if got, err := store.GetMessageByID("real_msg_without_tmp_id"); err != nil {
+		t.Fatal(err)
+	} else if got == nil {
+		t.Fatal("authoritative echo should remain")
+	}
+	key, err := store.GetOutgoingSendKey(tmpID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key == nil || key.MessageID != "real_msg_without_tmp_id" || key.Status != db.OutgoingSendStatusSent {
+		t.Fatalf("send key was not repointed to the authoritative echo: %+v", key)
+	}
+}
+
+func TestHandleMessage_DoesNotGuessBetweenAmbiguousTmpPlaceholders(t *testing.T) {
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for i, tmpID := range []string{"tmp_ambiguous_one", "tmp_ambiguous_two"} {
+		if err := store.UpsertMessage(&db.Message{
+			MessageID:      tmpID,
+			ConversationID: "c1",
+			Body:           "intentionally repeated",
+			IsFromMe:       true,
+			TimestampMS:    1000 + int64(i),
+			Status:         "OUTGOING_SENDING",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	handler := &EventHandler{Store: store, Logger: zerolog.Nop()}
+	handler.handleMessage(&libgm.WrappedMessage{Message: &gmproto.Message{
+		MessageID:      "real_ambiguous",
+		ConversationID: "c1",
+		Timestamp:      2200 * 1000,
+		SenderParticipant: &gmproto.Participant{
+			IsMe: true,
+		},
+		MessageInfo: []*gmproto.MessageInfo{{
+			Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: "intentionally repeated"}},
+		}},
+	}})
+
+	for _, tmpID := range []string{"tmp_ambiguous_one", "tmp_ambiguous_two"} {
+		if got, err := store.GetMessageByID(tmpID); err != nil {
+			t.Fatal(err)
+		} else if got == nil {
+			t.Fatalf("ambiguous placeholder %q should be preserved", tmpID)
+		}
+	}
+}
+
 func TestHandleMessage_BumpsConversationTimestamp(t *testing.T) {
 	store, err := db.New(":memory:")
 	if err != nil {

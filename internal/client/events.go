@@ -215,13 +215,15 @@ func (h *EventHandler) handleMessage(evt *libgm.WrappedMessage) {
 		h.Logger.Warn().Err(err).Str("conv_id", dbMsg.ConversationID).Msg("Failed to update conversation timestamp from message")
 	}
 
-	// When our sent message echoes back with a real server ID, clean up the
-	// exact tmp_ placeholder we stored at send time to avoid duplicates.
+	// When our sent message echoes back with a real server ID, replace the
+	// optimistic tmp_ placeholder. Some Google echoes omit their tmp ID, so the
+	// store also supports a conservative unique content/time fallback.
 	if dbMsg.IsFromMe {
-		if tmpID := msg.GetTmpID(); tmpID != "" && tmpID != dbMsg.MessageID {
-			if err := h.Store.DeleteMessageByID(tmpID); err == nil {
-				h.Logger.Debug().Str("tmp_id", tmpID).Str("conv_id", dbMsg.ConversationID).Msg("Cleaned up tmp message")
-			}
+		result, err := h.Store.ReconcileOutgoingEcho(dbMsg, msg.GetTmpID())
+		if err != nil {
+			h.Logger.Warn().Err(err).Str("msg_id", dbMsg.MessageID).Str("conv_id", dbMsg.ConversationID).Msg("Failed to reconcile outgoing message echo")
+		} else if result.TmpID != "" {
+			h.Logger.Debug().Str("tmp_id", result.TmpID).Str("match", result.Strategy).Str("conv_id", dbMsg.ConversationID).Msg("Reconciled outgoing message echo")
 		}
 	}
 
