@@ -2312,6 +2312,34 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 			return
 		}
 
+		// The web UI normally recognizes an existing direct route from its
+		// participants JSON. Older partial Google snapshots can leave that JSON
+		// empty, though, even when the stored messages clearly identify the
+		// peer. Reuse (and, when needed, repair) that local thread before asking
+		// Google to get/create a conversation. Besides being faster, this avoids
+		// a partial response overwriting the thread with the account owner's
+		// identity.
+		existing, peer, err := findStoredDirectSMSConversation(store, req.PhoneNumber)
+		if err != nil {
+			httpError(w, "find existing conversation: "+err.Error(), 500)
+			return
+		}
+		if existing != nil {
+			repaired, err := repairMissingDirectSMSIdentity(store, existing, peer, req.PhoneNumber)
+			if err != nil {
+				httpError(w, "repair conversation identity: "+err.Error(), 500)
+				return
+			}
+			if repaired {
+				publishConversations()
+			}
+			writeJSON(w, map[string]any{
+				"conversation_id": existing.ConversationID,
+				"name":            existing.Name,
+			})
+			return
+		}
+
 		cli := getClient()
 		if cli == nil {
 			httpError(w, app.ErrNotConnected, 503)
@@ -2335,25 +2363,81 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 		}
 
 		convoID := conv.GetConversationID()
-		name := req.PhoneNumber
-		// Try to get a name from participants
+		// GetOrCreateConversation can return an existing thread with only the
+		// account owner in its participant list. If the row already exists,
+		// preserve its complete stored identity instead of replacing it with
+		// that partial response.
+		if existing, err := store.GetConversation(convoID); err == nil && existing != nil {
+			writeJSON(w, map[string]any{
+				"conversation_id": existing.ConversationID,
+				"name":            existing.Name,
+			})
+			return
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			httpError(w, "load conversation: "+err.Error(), 500)
+			return
+		}
+
+		name := contactNameForNumber(store, req.PhoneNumber)
+		if name == "" {
+			name = req.PhoneNumber
+		}
+		type participantInfo struct {
+			Name      string `json:"name"`
+			Number    string `json:"number"`
+			IsMe      bool   `json:"is_me,omitempty"`
+			ID        string `json:"id,omitempty"`
+			ContactID string `json:"contact_id,omitempty"`
+		}
+		participants := make([]participantInfo, 0, len(conv.GetParticipants())+1)
+		hasPeer := false
 		for _, p := range conv.GetParticipants() {
+			participant := participantInfo{
+				Name:      p.GetFullName(),
+				IsMe:      p.GetIsMe(),
+				ContactID: p.GetContactID(),
+			}
+			if id := p.GetID(); id != nil {
+				participant.Number = id.GetNumber()
+				participant.ID = id.GetParticipantID()
+			}
+			if participant.Number == "" {
+				participant.Number = p.GetFormattedNumber()
+			}
 			if !p.GetIsMe() {
-				if fn := p.GetFormattedNumber(); fn != "" {
-					name = fn
+				hasPeer = true
+				if participant.Number == "" {
+					participant.Number = req.PhoneNumber
 				}
-				if cn := p.GetFullName(); cn != "" {
-					name = cn
+				if participant.Name != "" {
+					name = participant.Name
 				}
 			}
+			participants = append(participants, participant)
+		}
+		if !hasPeer {
+			participants = append(participants, participantInfo{
+				Name:   name,
+				Number: req.PhoneNumber,
+			})
+		}
+		participantsJSON, err := json.Marshal(participants)
+		if err != nil {
+			httpError(w, "encode participants: "+err.Error(), 500)
+			return
 		}
 
 		// Upsert into local DB so it shows in the sidebar
-		store.UpsertConversation(&db.Conversation{
+		if err := store.ApplyConversationSnapshot(&db.Conversation{
 			ConversationID: convoID,
 			Name:           name,
-			LastMessageTS:  time.Now().UnixMilli(),
-		})
+			IsGroup:        conv.GetIsGroupChat(),
+			Participants:   string(participantsJSON),
+			LastMessageTS:  conv.GetLastMessageTimestamp() / 1000,
+		}); err != nil {
+			httpError(w, "store conversation: "+err.Error(), 500)
+			return
+		}
 		publishConversations()
 
 		writeJSON(w, map[string]any{
@@ -3744,6 +3828,171 @@ func contactNameForNumber(store *db.Store, number string) string {
 		return name
 	}
 	return pick(store.ListContactsFromConversations(digits, 5))
+}
+
+func findStoredDirectSMSConversation(store *db.Store, phone string) (*db.Conversation, *db.Contact, error) {
+	queries := phoneMetadataQueries(phone)
+	seen := make(map[string]bool)
+	var candidates []*db.Conversation
+	for _, query := range queries {
+		matches, err := store.SearchConversationsByMetadata(query, 50)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, conversation := range matches {
+			if conversation == nil || seen[conversation.ConversationID] {
+				continue
+			}
+			seen[conversation.ConversationID] = true
+			candidates = append(candidates, conversation)
+		}
+	}
+
+	for _, conversation := range candidates {
+		if conversation.IsGroup {
+			continue
+		}
+		platform := strings.ToLower(strings.TrimSpace(conversation.SourcePlatform))
+		if platform != "" && platform != "sms" {
+			continue
+		}
+		if conversationHasPhoneParticipant(conversation.Participants, phone) {
+			return conversation, nil, nil
+		}
+		peer, err := store.LatestIncomingConversationSender(conversation.ConversationID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if peer != nil && phoneNumbersMatch(peer.Number, phone) {
+			return conversation, peer, nil
+		}
+	}
+	return nil, nil, nil
+}
+
+func repairMissingDirectSMSIdentity(store *db.Store, conversation *db.Conversation, peer *db.Contact, requestedPhone string) (bool, error) {
+	if conversation == nil || peer == nil || conversationHasExternalParticipant(conversation.Participants) {
+		return false, nil
+	}
+	number := strings.TrimSpace(peer.Number)
+	if number == "" {
+		number = strings.TrimSpace(requestedPhone)
+	}
+	name := contactNameForNumber(store, number)
+	if name == "" {
+		name = strings.TrimSpace(peer.Name)
+	}
+	if name == "" {
+		name = number
+	}
+	participants, err := json.Marshal([]map[string]string{{"name": name, "number": number}})
+	if err != nil {
+		return false, err
+	}
+	updated := *conversation
+	updated.Name = name
+	updated.Participants = string(participants)
+	if err := store.UpsertConversation(&updated); err != nil {
+		return false, err
+	}
+	*conversation = updated
+	return true, nil
+}
+
+func conversationHasExternalParticipant(raw string) bool {
+	var participants []struct {
+		Name   string `json:"name"`
+		Number string `json:"number"`
+		Phone  string `json:"phone"`
+		Email  string `json:"email"`
+		ID     string `json:"id"`
+		IsMe   bool   `json:"is_me"`
+		IsMe2  bool   `json:"isMe"`
+	}
+	if err := json.Unmarshal([]byte(raw), &participants); err != nil {
+		return false
+	}
+	for _, participant := range participants {
+		if participant.IsMe || participant.IsMe2 {
+			continue
+		}
+		if strings.TrimSpace(participant.Name) != "" ||
+			strings.TrimSpace(participant.Number) != "" ||
+			strings.TrimSpace(participant.Phone) != "" ||
+			strings.TrimSpace(participant.Email) != "" ||
+			strings.TrimSpace(participant.ID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func conversationHasPhoneParticipant(raw, phone string) bool {
+	var participants []struct {
+		Number string `json:"number"`
+		Phone  string `json:"phone"`
+		IsMe   bool   `json:"is_me"`
+		IsMe2  bool   `json:"isMe"`
+	}
+	if err := json.Unmarshal([]byte(raw), &participants); err != nil {
+		return false
+	}
+	for _, participant := range participants {
+		if participant.IsMe || participant.IsMe2 {
+			continue
+		}
+		if phoneNumbersMatch(firstNonEmptyString(participant.Number, participant.Phone), phone) {
+			return true
+		}
+	}
+	return false
+}
+
+func phoneMetadataQueries(phone string) []string {
+	raw := strings.TrimSpace(phone)
+	digits := phoneDigits(raw)
+	queries := []string{raw, digits}
+	if len(digits) > 10 {
+		queries = append(queries, digits[len(digits)-10:])
+	}
+	seen := make(map[string]bool)
+	out := make([]string, 0, len(queries))
+	for _, query := range queries {
+		if query == "" || seen[query] {
+			continue
+		}
+		seen[query] = true
+		out = append(out, query)
+	}
+	return out
+}
+
+func phoneNumbersMatch(left, right string) bool {
+	leftDigits := phoneDigits(left)
+	rightDigits := phoneDigits(right)
+	if len(leftDigits) < 7 || len(rightDigits) < 7 {
+		return false
+	}
+	return strings.HasSuffix(leftDigits, rightDigits) || strings.HasSuffix(rightDigits, leftDigits)
+}
+
+func phoneDigits(value string) string {
+	var digits strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	return digits.String()
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func googleAPIErrorMessage(action string, err error) string {

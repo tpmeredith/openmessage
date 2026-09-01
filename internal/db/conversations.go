@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -365,6 +366,30 @@ func (s *Store) SearchConversationsByMetadata(query string, limit int) ([]*Conve
 	return scanConversations(rows)
 }
 
+// LatestIncomingConversationSender returns the newest stored non-self sender
+// identity for a conversation without loading message bodies. Direct-message
+// route recovery uses this when a partial platform snapshot has lost the
+// conversation's participant metadata.
+func (s *Store) LatestIncomingConversationSender(conversationID string) (*Contact, error) {
+	var name, number string
+	err := s.db.QueryRow(`
+		SELECT sender_name, sender_number
+		FROM messages
+		WHERE conversation_id = ?
+			AND is_from_me = 0
+			AND TRIM(sender_number) != ''
+		ORDER BY timestamp_ms DESC, message_id DESC
+		LIMIT 1
+	`, conversationID).Scan(&name, &number)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &Contact{Name: name, Number: number}, nil
+}
+
 func scanConversations(rows interface {
 	Next() bool
 	Scan(...any) error
@@ -487,6 +512,16 @@ func maybeNotificationModeArg(hasMode bool, mode string) string {
 func (s *Store) ApplyConversationSnapshot(c *Conversation) error {
 	existing, err := s.GetConversation(c.ConversationID)
 	if err == nil && existing != nil {
+		// Google can return an identity-incomplete snapshot (empty or self-only
+		// participants) from GetOrCreateConversation and some state events. Do
+		// not let that partial view replace an established peer/group identity.
+		if !conversationHasExternalParticipant(c.Participants) && conversationHasExternalParticipant(existing.Participants) {
+			c.Name = existing.Name
+			c.IsGroup = existing.IsGroup
+			c.Participants = existing.Participants
+		} else if strings.TrimSpace(c.Name) == "" {
+			c.Name = existing.Name
+		}
 		snapshotTS := c.LastMessageTS
 		if snapshotTS < existing.LastMessageTS {
 			c.LastMessageTS = existing.LastMessageTS
@@ -496,4 +531,32 @@ func (s *Store) ApplyConversationSnapshot(c *Conversation) error {
 		}
 	}
 	return s.UpsertConversation(c)
+}
+
+func conversationHasExternalParticipant(raw string) bool {
+	var participants []struct {
+		Name   string `json:"name"`
+		Number string `json:"number"`
+		Phone  string `json:"phone"`
+		Email  string `json:"email"`
+		ID     string `json:"id"`
+		IsMe   bool   `json:"is_me"`
+		IsMe2  bool   `json:"isMe"`
+	}
+	if err := json.Unmarshal([]byte(raw), &participants); err != nil {
+		return false
+	}
+	for _, participant := range participants {
+		if participant.IsMe || participant.IsMe2 {
+			continue
+		}
+		if strings.TrimSpace(participant.Name) != "" ||
+			strings.TrimSpace(participant.Number) != "" ||
+			strings.TrimSpace(participant.Phone) != "" ||
+			strings.TrimSpace(participant.Email) != "" ||
+			strings.TrimSpace(participant.ID) != "" {
+			return true
+		}
+	}
+	return false
 }

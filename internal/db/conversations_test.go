@@ -661,6 +661,25 @@ func TestApplyConversationSnapshotGuardsStaleState(t *testing.T) {
 		t.Fatalf("mark read: %v", err)
 	}
 
+	t.Run("identity-incomplete snapshot cannot erase known peer", func(t *testing.T) {
+		partial := &Conversation{
+			ConversationID: "conv-snap",
+			Name:           "Me",
+			Participants:   `[{"name":"Me","number":"+15550000000","is_me":true}]`,
+			LastMessageTS:  5000,
+		}
+		if err := store.ApplyConversationSnapshot(partial); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+		got, _ := store.GetConversation("conv-snap")
+		if got.Name != "Alice" {
+			t.Errorf("name overwritten by partial snapshot: got %q, want Alice", got.Name)
+		}
+		if got.Participants != seed.Participants {
+			t.Errorf("participants overwritten by partial snapshot: got %q, want %q", got.Participants, seed.Participants)
+		}
+	})
+
 	t.Run("stale snapshot cannot resurrect unread or regress recency", func(t *testing.T) {
 		stale := &Conversation{
 			ConversationID: "conv-snap",

@@ -4063,6 +4063,66 @@ func TestNewConversationSignalPlatformUsesContactName(t *testing.T) {
 	}
 }
 
+func TestNewConversationRepairsAndReusesSMSRouteWithMissingParticipants(t *testing.T) {
+	ts := newTestServer(t)
+	if err := ts.store.UpsertConversation(&db.Conversation{
+		ConversationID: "sms-derrick",
+		Name:           "Timothy Meredith",
+		Participants:   "",
+		LastMessageTS:  9999,
+		SourcePlatform: "sms",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.store.UpsertMessage(&db.Message{
+		MessageID:      "incoming",
+		ConversationID: "sms-derrick",
+		SenderName:     "Derrick Sychantha",
+		SenderNumber:   "+16153947677",
+		Body:           "hello",
+		TimestampMS:    1000,
+		SourcePlatform: "sms",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// No Google client is configured. A 200 therefore proves the endpoint
+	// reused the stored route instead of calling GetOrCreateConversation.
+	resp, err := http.Post(ts.server.URL+"/api/new-conversation", "application/json",
+		strings.NewReader(`{"phone_number":"+16153947677","platform":"sms"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body)
+	}
+	var got struct {
+		ConversationID string `json:"conversation_id"`
+		Name           string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ConversationID != "sms-derrick" || got.Name != "Derrick Sychantha" {
+		t.Fatalf("response = %+v, want repaired Derrick route", got)
+	}
+	stored, err := ts.store.GetConversation("sms-derrick")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Name != "Derrick Sychantha" {
+		t.Errorf("stored name = %q", stored.Name)
+	}
+	if !strings.Contains(stored.Participants, "+16153947677") {
+		t.Errorf("stored participants = %q", stored.Participants)
+	}
+	if stored.LastMessageTS != 9999 {
+		t.Errorf("repair changed recency: got %d, want 9999", stored.LastMessageTS)
+	}
+}
+
 func TestNewConversationPlatformValidation(t *testing.T) {
 	ts := newTestServer(t)
 
