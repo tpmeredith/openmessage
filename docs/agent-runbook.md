@@ -434,18 +434,24 @@ Without it, a single transient network blip during a scheduled token refresh
 permanently killed the session.
 
 The replacement in `go.mod` pins fork commit
-[`0e43542dfa0e`](https://github.com/MaxGhenis/gmessages/commit/0e43542dfa0e0b97e410f185a5842e8740106099).
+[`47a5cd6dd9bb`](https://github.com/MaxGhenis/gmessages/commit/47a5cd6dd9bb32807af2cc8e8ce69504e5e1c6c0).
 It is upstream `mautrix/gmessages` base
-[`3433cc07d5ea`](https://github.com/mautrix/gmessages/commit/3433cc07d5ea9522309adad3a8c92ed5b08dc11d),
-which contains the auth-refresh retry, plus exactly one carried patch:
-`Add ListConversationsWithCursor for paginated conversation listing`. That
-method is required by OpenMessage's backfill and reconciliation paths.
+[`770cb9a38188`](https://github.com/mautrix/gmessages/commit/770cb9a381887e9f34efb9d4868594529d7cf9cb),
+which contains the auth-refresh retry and current Google account pairing
+protocol, plus exactly one carried patch:
+`libgm: expose context-aware pagination and liveness methods`. This preserves
+`ListConversationsWithCursor` for backfill and reconciliation and exposes a
+cancelable `NotifyDittoActivity` for supervisor probes. The updated library
+requires Go 1.26 and context-aware calls. The accompanying Whatsmeow update
+keeps its database upgrade registration compatible with the shared util module.
 
 **Keep the fork rebased on upstream.** The weekly
 `gmessages-fork-drift.yml` workflow records the base and patch set and fails as
 soon as upstream `main` advances. When rebasing, replay the single carried
 patch, verify the auth-refresh retry is still present, and update the fork pin
-and recorded SHAs together. The durable architectural fix (move SMS/RCS onto
+and recorded SHAs together. Publish the dependency commit before submitting
+the OpenMessage pin so a clean checkout can resolve it without local overrides.
+The durable architectural fix (move SMS/RCS onto
 an Android companion) is issue #75.
 
 ### Don't over-reconnect

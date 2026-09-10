@@ -13,8 +13,8 @@ import (
 const (
 	gmessagesModule            = "go.mau.fi/mautrix-gmessages"
 	gmessagesFork              = "github.com/MaxGhenis/gmessages"
-	minimumGMessagesFork       = "v0.2602.1-0.20260703132304-0e43542dfa0e"
-	minimumGMessagesForkTime   = "20260703132304"
+	minimumGMessagesFork       = "v0.2608.1-0.20260910010105-47a5cd6dd9bb"
+	minimumGMessagesForkTime   = "20260910010105"
 	gmessagesAuthRetryContract = "libgm/longpoll auth-refresh network retry"
 )
 

@@ -93,7 +93,7 @@ func runQRPairing(logger zerolog.Logger, cli *client.Client, sessionPath string)
 	}()
 
 	// Start login - shows first QR code
-	qrURL, err := cli.GM.StartLogin()
+	qrURL, err := cli.GM.StartLogin(context.Background())
 	if err != nil {
 		return fmt.Errorf("start login: %w", err)
 	}
@@ -180,10 +180,17 @@ func runGoogleAccountPairing(cli *client.Client, sessionPath, rawInput string) e
 	cli.GM.AuthData.Cookies = cookies
 
 	fmt.Println("Starting Google account pairing...")
-	err = cli.GM.DoGaiaPairing(context.Background(), func(emoji string) {
-		fmt.Println("EMOJI:", emoji)
-		fmt.Println("Tap this emoji in Google Messages on your phone.")
-	})
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	// Use the split API so this one-shot command can save the session before
+	// disconnecting. DoGaiaPairing also starts an asynchronous reconnect.
+	emoji, pairing, err := cli.GM.StartGaiaPairing(ctx, ctx)
+	if err != nil {
+		return fmt.Errorf("start google account pairing: %w", err)
+	}
+	fmt.Println("EMOJI:", emoji)
+	fmt.Println("Tap this emoji in Google Messages on your phone.")
+	_, err = cli.GM.FinishGaiaPairing(ctx, pairing)
 	if err != nil {
 		return fmt.Errorf("google account pairing: %w", err)
 	}
