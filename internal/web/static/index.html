@@ -6071,12 +6071,16 @@ body::after {
   const typingStateByConversation = new Map();
   const typingClearTimers = new Map();
   const LINK_PREVIEW_CACHE_LIMIT = 256;
+  const LINK_PREVIEW_CONCURRENCY = 2;
+  const LINK_PREVIEW_TIMEOUT_MS = 8000;
   const NATIVE_AVATAR_CACHE_LIMIT = 256;
   const WHATSAPP_AVATAR_CACHE_LIMIT = 128;
   const GOOGLE_AVATAR_CACHE_LIMIT = 256;
   const MEDIA_LOADER_LABEL_DELAY_MS = 2500;
   const linkPreviewCache = new Map();
   const linkPreviewInflight = new Map();
+  const linkPreviewQueue = [];
+  let activeLinkPreviewRequests = 0;
   const nativeAvatarCache = new Map();
   const nativeAvatarInflight = new Map();
   const whatsAppAvatarCache = new Map();
@@ -9503,9 +9507,9 @@ body::after {
     return message;
   }
 
-  async function fetchJSON(url) {
+  async function fetchJSON(url, options = {}) {
     try {
-      const r = await fetch(API + url);
+      const r = await fetch(API + url, options);
       if (!r.ok) throw new Error(await responseError(r));
       return r.json();
     } catch (err) {
@@ -10434,30 +10438,67 @@ body::after {
     return !!(preview.title || preview.description || preview.image_url || preview.site_name);
   }
 
-  async function fetchLinkPreview(url) {
-    if (!url) return null;
+  function fetchLinkPreview(url) {
+    if (!url) return Promise.resolve(null);
     const cachedPreview = cacheGetFresh(linkPreviewCache, url);
     if (cachedPreview !== undefined) {
-      return cachedPreview;
+      return Promise.resolve(cachedPreview);
     }
     if (linkPreviewInflight.has(url)) {
-      return linkPreviewInflight.get(url);
+      return linkPreviewInflight.get(url).promise;
     }
-    const request = fetchJSON(`/api/link-preview?url=${encodeURIComponent(url)}`)
-      .then(preview => {
-        const resolved = hasRenderableLinkPreview(preview) ? preview : null;
-        cacheSetBounded(linkPreviewCache, url, resolved, LINK_PREVIEW_CACHE_LIMIT);
-        linkPreviewInflight.delete(url);
-        return resolved;
-      })
-      .catch(err => {
-        console.error('Failed to load link preview:', err);
-        cacheSetBounded(linkPreviewCache, url, null, LINK_PREVIEW_CACHE_LIMIT);
-        linkPreviewInflight.delete(url);
-        return null;
-      });
+    const request = { url, controller: new AbortController(), resolve: null, promise: null };
+    request.promise = new Promise(resolve => { request.resolve = resolve; });
     linkPreviewInflight.set(url, request);
-    return request;
+    linkPreviewQueue.push(request);
+    drainLinkPreviewQueue();
+    return request.promise;
+  }
+
+  function drainLinkPreviewQueue() {
+    // Preview fetches share the origin's HTTP/1.1 connection pool with message
+    // reads and SSE. Leave connections available for opening another thread.
+    while (activeLinkPreviewRequests < LINK_PREVIEW_CONCURRENCY && linkPreviewQueue.length) {
+      const request = linkPreviewQueue.shift();
+      activeLinkPreviewRequests += 1;
+      const timeout = setTimeout(() => request.controller.abort(), LINK_PREVIEW_TIMEOUT_MS);
+      fetchJSON(`/api/link-preview?url=${encodeURIComponent(request.url)}`, { signal: request.controller.signal })
+        .then(preview => {
+          if (request.controller.signal.aborted) return null;
+          const resolved = hasRenderableLinkPreview(preview) ? preview : null;
+          cacheSetBounded(linkPreviewCache, request.url, resolved, LINK_PREVIEW_CACHE_LIMIT);
+          return resolved;
+        })
+        .catch(err => {
+          // A thread switch or timeout must not negatively cache the URL: it
+          // can still have a valid preview when this thread is opened again.
+          if (!request.controller.signal.aborted) {
+            console.error('Failed to load link preview:', err);
+            cacheSetBounded(linkPreviewCache, request.url, null, LINK_PREVIEW_CACHE_LIMIT);
+          }
+          return null;
+        })
+        .then(request.resolve)
+        .finally(() => {
+          clearTimeout(timeout);
+          activeLinkPreviewRequests -= 1;
+          if (linkPreviewInflight.get(request.url) === request) {
+            linkPreviewInflight.delete(request.url);
+          }
+          drainLinkPreviewQueue();
+        });
+    }
+  }
+
+  function cancelLinkPreviews() {
+    linkPreviewQueue.length = 0;
+    for (const request of linkPreviewInflight.values()) {
+      request.controller.abort();
+      request.resolve(null);
+    }
+    linkPreviewInflight.clear();
+    // Active requests release their slots in finally, including when a new
+    // thread queues the same URL before the aborted fetch has settled.
   }
 
   function renderLinkPreviewHTML(preview) {
@@ -10598,6 +10639,7 @@ body::after {
   let lastRenderedWindowEnd = 0;
 
   function resetLoadedThreadState({ preserveThreadSearch = false } = {}) {
+    cancelLinkPreviews();
     activeThreadToken += 1;
     if (pendingBottomScrollFrame) {
       cancelAnimationFrame(pendingBottomScrollFrame);
