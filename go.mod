@@ -45,4 +45,4 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 )
 
-replace go.mau.fi/mautrix-gmessages => github.com/MaxGhenis/gmessages v0.2602.1-0.20261021163109-6495a585293d
+replace go.mau.fi/mautrix-gmessages => github.com/tpmeredith/gmessages v0.2605.1-0.20261029224313-5bfc66e1bc51
